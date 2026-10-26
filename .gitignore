@@ -1,0 +1,30 @@
+# Python
+windows_server/.venv/
+windows_server/venv/
+windows_server/__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Flutter
+android_app/.dart_tool/
+android_app/.flutter-plugins
+android_app/.flutter-plugins-dependencies
+android_app/.packages
+android_app/build/
+android_app/.pub-cache/
+android_app/.pub/
+android_app/android/.gradle/
+android_app/android/local.properties
+android_app/android/app/debug/
+android_app/android/app/profile/
+android_app/android/app/release/
+android_app/android/key.properties
+**/*.iml
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
