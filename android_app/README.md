@@ -14,12 +14,30 @@ flutter pub get
 flutter run
 ```
 
-For a release APK:
+For a local debug APK, use `flutter build apk --debug`. A Play Store submission must be a signed Android App Bundle (AAB).
+
+## Prepare a Play Store release
+
+The app targets API 36 and uses application ID `com.shivachaitanya07.phoneremote`. Confirm that this ID is available and keep it unchanged after publishing.
+
+Create an upload keystore in this `android` folder, keep it backed up securely, and never commit it:
 
 ```powershell
-flutter build apk --release
+cd android
+keytool -genkeypair -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+Copy-Item key.properties.example key.properties
 ```
 
-The APK is written to `build\app\outputs\flutter-apk\app-release.apk`.
+Edit `android\key.properties` with the passwords and alias you chose. Confirm `storeFile=upload-keystore.jks` points to the keystore in the `android` folder. The keystore and `key.properties` are excluded from Git.
 
-On the connection screen, enter the IPv4 address printed by the Windows server and port `8765`. The app remembers the last address and reconnects automatically after a Wi-Fi interruption.
+Then build the Play bundle:
+
+```powershell
+cd ..
+flutter pub get
+flutter build appbundle --release
+```
+
+The signed bundle is written to `build\app\outputs\bundle\release\app-release.aab`.
+
+See the repository's `PLAY_STORE_CHECKLIST.md` and `PRIVACY_POLICY.md` before submission. Replace the privacy contact placeholder and host the policy at a public HTTPS URL.

@@ -1,4 +1,4 @@
-package com.smartcontroller.smart_controller
+package com.shivachaitanya07.phoneremote
 
 import io.flutter.embedding.android.FlutterActivity
 

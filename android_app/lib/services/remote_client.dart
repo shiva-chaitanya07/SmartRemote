@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -12,12 +14,14 @@ class LinkSnapshot {
     required this.status,
     this.host = '',
     this.port = 8765,
+    this.certificateFingerprint = '',
     this.error,
   });
 
   final LinkStatus status;
   final String host;
   final int port;
+  final String certificateFingerprint;
   final String? error;
 
   bool get isConnected => status == LinkStatus.connected;
@@ -50,17 +54,28 @@ class RemoteClient {
   int _attempt = 0;
   String _host = '';
   int _port = 8765;
+  String _certificateFingerprint = '';
+  String _pairingCode = '';
+  HttpClient? _httpClient;
   LinkStatus _status = LinkStatus.disconnected;
 
   LinkSnapshot get snapshot => LinkSnapshot(
         status: _status,
         host: _host,
         port: _port,
+        certificateFingerprint: _certificateFingerprint,
       );
 
-  Future<void> connect(String host, int port) async {
+  Future<void> connect(
+    String host,
+    int port,
+    String certificateFingerprint,
+    String pairingCode,
+  ) async {
     _host = host.trim();
     _port = port;
+    _certificateFingerprint = certificateFingerprint.toLowerCase();
+    _pairingCode = pairingCode.trim();
     _wantConnected = true;
     _attempt = 0;
     if (_host.isEmpty || _port < 1 || _port > 65535) {
@@ -96,17 +111,22 @@ class RemoteClient {
     await _tearDown();
     _set(isRetry ? LinkStatus.reconnecting : LinkStatus.connecting);
 
-    final uri = Uri(scheme: 'ws', host: _host, port: _port);
+    final uri = Uri(scheme: 'wss', host: _host, port: _port, path: '/remote');
     try {
+      final httpClient = HttpClient();
+      httpClient.badCertificateCallback = (certificate, _, __) {
+        final presented = sha256.convert(certificate.der).toString();
+        return presented == _certificateFingerprint;
+      };
+      _httpClient = httpClient;
       final channel = IOWebSocketChannel.connect(
         uri,
+        customClient: httpClient,
         connectTimeout: const Duration(seconds: 6),
       );
       _channel = channel;
       await channel.ready;
       _attempt = 0;
-      _set(LinkStatus.connected);
-      _startPing();
       _sub = channel.stream.listen(
         _onData,
         onError: (Object error) => _scheduleReconnect(error.toString()),
@@ -114,17 +134,40 @@ class RemoteClient {
         cancelOnError: true,
       );
     } on WebSocketChannelException catch (error) {
-      _scheduleReconnect(error.message ?? 'WebSocket error');
+      _scheduleReconnect(
+        error.message?.contains('certificate') == true
+            ? 'Server certificate check failed. Verify its SHA-256 fingerprint.'
+            : 'Secure connection failed. Check the server, IP, port, and fingerprint.',
+      );
     } catch (error) {
-      _scheduleReconnect(error.toString());
+      _scheduleReconnect(
+        'Secure connection failed. Check the server, IP, port, and fingerprint.',
+      );
     }
   }
 
   void _onData(dynamic raw) {
     final message = ServerMessage.tryParse(raw);
     if (message == null) return;
-    if (message.type == 'hello' && message.status == 'ok') {
-      _set(LinkStatus.connected);
+    if (message.type == 'hello' && message.status == 'auth_required') {
+      _channel?.sink.add(
+        RemoteEvent.encode({
+          'type': 'authenticate',
+          'pairing_code': _pairingCode,
+        }),
+      );
+    } else if (message.type == 'auth_result') {
+      if (message.status == 'ok') {
+        _set(LinkStatus.connected);
+        _startPing();
+      } else {
+        _wantConnected = false;
+        final reason = message.status == 'busy'
+            ? 'Another phone is already connected'
+            : 'Pairing failed. Check the code and try again.';
+        _set(LinkStatus.disconnected, error: reason);
+        _tearDown();
+      }
     }
   }
 
@@ -161,6 +204,8 @@ class RemoteClient {
       await _channel?.sink.close();
     } catch (_) {}
     _channel = null;
+    _httpClient?.close(force: true);
+    _httpClient = null;
   }
 
   void _set(LinkStatus status, {String? error}) {
@@ -170,6 +215,7 @@ class RemoteClient {
         status: status,
         host: _host,
         port: _port,
+        certificateFingerprint: _certificateFingerprint,
         error: error,
       ),
     );

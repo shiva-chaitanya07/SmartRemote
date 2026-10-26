@@ -1,5 +1,6 @@
-# Pinned for Python 3.7+ (3.8+ recommended).
-websockets==10.4
-pynput==1.7.6
+# Pinned runtime dependencies. Python 3.11+ is required.
+websockets==17.3
+pynput==1.8.2
 pystray==0.19.5
-Pillow==9.5.0
+Pillow==13.0.0
+cryptography==50.0.2

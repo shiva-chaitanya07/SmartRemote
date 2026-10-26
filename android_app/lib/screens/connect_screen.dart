@@ -5,6 +5,7 @@ import '../providers/connection_provider.dart';
 import '../services/remote_client.dart';
 import '../theme.dart';
 import '../widgets/status_banner.dart';
+import 'privacy_screen.dart';
 import 'remote_screen.dart';
 
 class ConnectScreen extends ConsumerStatefulWidget {
@@ -17,12 +18,16 @@ class ConnectScreen extends ConsumerStatefulWidget {
 class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   final _ipController = TextEditingController();
   final _portController = TextEditingController(text: '8765');
+  final _fingerprintController = TextEditingController();
+  final _pairingCodeController = TextEditingController();
   bool _hydrated = false;
 
   @override
   void dispose() {
     _ipController.dispose();
     _portController.dispose();
+    _fingerprintController.dispose();
+    _pairingCodeController.dispose();
     super.dispose();
   }
 
@@ -31,6 +36,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     if (snapshot.host.isEmpty) return;
     _ipController.text = snapshot.host;
     _portController.text = '${snapshot.port}';
+    _fingerprintController.text = snapshot.certificateFingerprint;
     _hydrated = true;
   }
 
@@ -50,7 +56,12 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
       );
       return;
     }
-    await ref.read(connectionProvider.notifier).connect(ip, port);
+    await ref.read(connectionProvider.notifier).connect(
+          ip,
+          port,
+          _fingerprintController.text,
+          _pairingCodeController.text,
+        );
   }
 
   Future<void> _cancelRetry() =>
@@ -71,17 +82,18 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     _hydrate(snapshot);
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SizedBox(height: 28),
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+              const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerLeft,
                 child: StatusBanner(snapshot: snapshot),
               ),
-              const Spacer(),
+              const SizedBox(height: 24),
               Container(
                 width: 72,
                 height: 72,
@@ -104,7 +116,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'Turn this phone into a wireless keyboard and touchpad for your Windows laptop.',
+                'Control your Windows laptop securely over your local Wi-Fi.',
                 style: TextStyle(color: AppTheme.textMuted, height: 1.4),
               ),
               const SizedBox(height: 28),
@@ -126,6 +138,38 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                 decoration: const InputDecoration(
                   labelText: 'Port',
                   hintText: '8765',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _pairingCodeController,
+                keyboardType: TextInputType.number,
+                maxLength: 8,
+                style: const TextStyle(color: AppTheme.textPrimary),
+                decoration: const InputDecoration(
+                  labelText: '8-digit pairing code',
+                  hintText: 'Shown in the Windows server window',
+                  counterText: '',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _fingerprintController,
+                keyboardType: TextInputType.text,
+                textCapitalization: TextCapitalization.characters,
+                autocorrect: false,
+                minLines: 2,
+                maxLines: 2,
+                maxLength: 95,
+                style: const TextStyle(
+                  color: AppTheme.textPrimary,
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                ),
+                decoration: const InputDecoration(
+                  labelText: 'Server certificate SHA-256 fingerprint',
+                  hintText: 'Paste the fingerprint shown by the server',
+                  counterText: '',
                 ),
               ),
               if (snapshot.error != null &&
@@ -151,15 +195,22 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                           : 'Connect',
                 ),
               ),
-              const Spacer(flex: 2),
+              const SizedBox(height: 20),
               const Text(
-                'Phone and laptop must be on the same Wi-Fi. The Python server prints the IP when it starts.',
+                'Copy the pairing code and certificate fingerprint from the Windows server. Compare the fingerprint before connecting. Both devices must be on the same trusted Wi-Fi.',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                     color: AppTheme.textMuted, fontSize: 12, height: 1.4),
               ),
+              TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const PrivacyScreen()),
+                ),
+                child: const Text('Privacy Policy'),
+              ),
               const SizedBox(height: 20),
-            ],
+              ],
+            ),
           ),
         ),
       ),

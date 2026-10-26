@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SmartController Windows server.
+Phone Remote Windows server.
 
 Listens for WebSocket connections from the Android app and injects
 keyboard / mouse / media events with pynput.
@@ -16,19 +16,31 @@ from __future__ import print_function
 
 import argparse
 import asyncio
+from collections import deque
+from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import ipaddress
 import json
 import logging
 import os
+from pathlib import Path
+import secrets
 import signal
 import socket
+import ssl
 import sys
 import threading
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import Any, Dict, Tuple
+
+if sys.version_info < (3, 11):
+    print("Phone Remote requires Python 3.11 or newer. Install a current Python 3 release.")
+    sys.exit(1)
 
 try:
-    import websockets
+    from websockets.asyncio.server import serve
     from websockets.exceptions import ConnectionClosed
-    from websockets.server import WebSocketServerProtocol
 except ImportError:
     print("Missing dependency: websockets. Run:  pip install -r requirements.txt")
     sys.exit(1)
@@ -48,6 +60,12 @@ MAX_MESSAGE_BYTES = 32 * 1024
 MAX_TEXT_CHARS = 500
 MAX_MOUSE_DELTA = 4000
 MAX_SCROLL = 50
+AUTH_TIMEOUT_SECONDS = 8
+AUTH_FAILURE_LIMIT = 5
+AUTH_FAILURE_WINDOW_SECONDS = 60
+AUTH_LOCKOUT_SECONDS = 60
+MAX_PENDING_CLIENTS = 4
+MAX_AUTH_FAILURE_IPS = 256
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,6 +76,19 @@ log = logging.getLogger("smartcontroller")
 
 keyboard = KeyboardController()
 mouse = MouseController()
+_auth_failures = {}  # peer IP -> deque of monotonic failure times
+_active_client = None
+_pending_clients = set()
+_PAIRING_CODE = ""
+
+try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+except ImportError:
+    print("Missing dependency: cryptography. Run:  pip install -r requirements.txt")
+    sys.exit(1)
 
 # Maps protocol key names (from the Flutter app) to pynput keys.
 SPECIAL_KEYS = {
@@ -148,6 +179,131 @@ def get_lan_ipv4():
             seen.add(ip)
             unique.append(ip)
     return unique
+
+
+def _local_data_dir():
+    """Return a per-user directory for the private TLS key and certificate."""
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        base = str(Path.home() / "AppData" / "Local")
+    directory = Path(base) / "Phone Remote"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _ensure_tls_certificate():
+    """Create or load the server identity; only the certificate fingerprint is shared."""
+    directory = _local_data_dir()
+    key_path = directory / "server-key.pem"
+    cert_path = directory / "server-cert.pem"
+
+    if key_path.exists() and cert_path.exists():
+        try:
+            cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+            private_key = serialization.load_pem_private_key(
+                key_path.read_bytes(), password=None
+            )
+            if private_key.public_key().public_numbers() != cert.public_key().public_numbers():
+                raise ValueError("TLS key does not match certificate")
+        except Exception as exc:
+            log.warning("Stored TLS identity is invalid; generating a new one: %s", exc)
+        else:
+            return str(cert_path), str(key_path), cert
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name(
+        [x509.NameAttribute(NameOID.COMMON_NAME, "Phone Remote local server")]
+    )
+    now = datetime.now(timezone.utc)
+    san_entries = [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+    for address in get_lan_ipv4():
+        try:
+            parsed = ipaddress.ip_address(address)
+            if parsed not in [entry.value for entry in san_entries]:
+                san_entries.append(x509.IPAddress(parsed))
+        except ValueError:
+            continue
+
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1825))
+        .add_extension(x509.SubjectAlternativeName(san_entries), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(private_key, hashes.SHA256())
+    )
+
+    key_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    cert_bytes = cert.public_bytes(serialization.Encoding.PEM)
+    key_path.write_bytes(key_bytes)
+    cert_path.write_bytes(cert_bytes)
+    try:
+        os.chmod(str(key_path), 0o600)
+    except OSError:
+        pass  # Windows protects files under the user's LocalAppData ACL.
+    return str(cert_path), str(key_path), cert
+
+
+def _fingerprint(cert):
+    digest = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest().upper()
+    return ":".join(digest[index : index + 2] for index in range(0, len(digest), 2))
+
+
+def _make_tls_context(cert_path, key_path):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+    return context
+
+
+def _auth_is_blocked(peer_ip):
+    entry = _auth_failures.get(peer_ip)
+    if not entry:
+        return False
+    now = time.monotonic()
+    if entry["locked_until"] > now:
+        return True
+    while entry["failures"] and now - entry["failures"][0] > AUTH_FAILURE_WINDOW_SECONDS:
+        entry["failures"].popleft()
+    if entry["locked_until"]:
+        entry["locked_until"] = 0
+    if not entry["failures"]:
+        _auth_failures.pop(peer_ip, None)
+    return False
+
+
+def _record_auth_failure(peer_ip):
+    now = time.monotonic()
+    for old_ip, old_entry in list(_auth_failures.items()):
+        while (
+            old_entry["failures"]
+            and now - old_entry["failures"][0] > AUTH_FAILURE_WINDOW_SECONDS
+        ):
+            old_entry["failures"].popleft()
+        if not old_entry["failures"] and old_entry["locked_until"] <= now:
+            _auth_failures.pop(old_ip, None)
+    if peer_ip not in _auth_failures and len(_auth_failures) >= MAX_AUTH_FAILURE_IPS:
+        _auth_failures.pop(next(iter(_auth_failures)))
+    entry = _auth_failures.setdefault(
+        peer_ip, {"failures": deque(), "locked_until": 0}
+    )
+    while entry["failures"] and now - entry["failures"][0] > AUTH_FAILURE_WINDOW_SECONDS:
+        entry["failures"].popleft()
+    entry["failures"].append(now)
+    if len(entry["failures"]) >= AUTH_FAILURE_LIMIT:
+        entry["locked_until"] = now + AUTH_LOCKOUT_SECONDS
+
+
+def _clear_auth_failures(peer_ip):
+    _auth_failures.pop(peer_ip, None)
 
 
 def _clamp(value, lo, hi):
@@ -271,26 +427,67 @@ async def send_json(ws, data):
     await ws.send(json.dumps(data))
 
 
-async def handle_client(ws, path):
-    # type: (WebSocketServerProtocol, str) -> None
+async def handle_client(ws):
+    """Authenticate a certificate-pinned client before accepting control events."""
+    global _active_client
+
     peer = getattr(ws, "remote_address", None)
-    log.info("Client connected from %s path=%s", peer, path)
+    peer_ip = str(peer[0]) if isinstance(peer, tuple) and peer else "unknown"
+    path = getattr(getattr(ws, "request", None), "path", "")
+    log.info("Connection attempt from %s", peer_ip)
+
     held_keys = []
-    await send_json(
-        ws,
-        {
-            "type": "hello",
-            "status": "ok",
-            "server": APP_NAME,
-            "protocol": 1,
-        },
-    )
+    held_buttons = []
+    authenticated = False
     try:
+        if path != "/remote":
+            await ws.close(code=1008, reason="Unsupported endpoint")
+            return
+        if _auth_is_blocked(peer_ip):
+            await ws.close(code=1008, reason="Pairing temporarily locked")
+            return
+        if len(_pending_clients) >= MAX_PENDING_CLIENTS:
+            await ws.close(code=1013, reason="Too many pending pairing attempts")
+            return
+        _pending_clients.add(ws)
+
+        await send_json(
+            ws,
+            {"type": "hello", "status": "auth_required", "server": APP_NAME, "protocol": 2},
+        )
+        try:
+            raw_auth = await asyncio.wait_for(ws.recv(), timeout=AUTH_TIMEOUT_SECONDS)
+            auth = json.loads(raw_auth) if isinstance(raw_auth, str) else None
+        except (asyncio.TimeoutError, ValueError, ConnectionClosed):
+            auth = None
+
+        supplied_code = auth.get("pairing_code") if isinstance(auth, dict) else None
+        if (
+            not isinstance(supplied_code, str)
+            or auth.get("type") != "authenticate"
+            or not hmac.compare_digest(supplied_code, _PAIRING_CODE)
+        ):
+            _record_auth_failure(peer_ip)
+            await send_json(ws, {"type": "auth_result", "status": "denied"})
+            await ws.close(code=1008, reason="Pairing failed")
+            return
+
+        if _active_client is not None:
+            await send_json(ws, {"type": "auth_result", "status": "busy"})
+            await ws.close(code=1013, reason="Another remote is already connected")
+            return
+
+        _clear_auth_failures(peer_ip)
+        _active_client = ws
+        authenticated = True
+        await send_json(ws, {"type": "auth_result", "status": "ok"})
+        log.info("Authenticated remote connected from %s", peer_ip)
+
         async for raw in ws:
             if not isinstance(raw, str):
                 await send_json(ws, {"type": "error", "message": "expected JSON text"})
                 continue
-            if len(raw) > MAX_MESSAGE_BYTES:
+            if len(raw.encode("utf-8")) > MAX_MESSAGE_BYTES:
                 await send_json(ws, {"type": "error", "message": "message too large"})
                 continue
             try:
@@ -312,6 +509,15 @@ async def handle_client(ws, path):
                 held_key = _resolve_key(payload.get("key", ""))
                 if held_key in held_keys:
                     held_keys.remove(held_key)
+            elif ok and event_type == "mouse_down":
+                held_button = MOUSE_BUTTONS.get(str(payload.get("button", "left")).lower())
+                if held_button is not None and held_button not in held_buttons:
+                    held_buttons.append(held_button)
+            elif ok and event_type == "mouse_up":
+                held_button = MOUSE_BUTTONS.get(str(payload.get("button", "left")).lower())
+                if held_button in held_buttons:
+                    held_buttons.remove(held_button)
+
             if event_type == "ping":
                 await send_json(ws, {"type": "pong"})
             elif not ok:
@@ -321,16 +527,23 @@ async def handle_client(ws, path):
     except Exception:
         log.exception("Client handler crashed")
     finally:
-        # Release modifiers if Wi-Fi drops while a key is held.
+        _pending_clients.discard(ws)
         for held_key in held_keys:
             try:
                 keyboard.release(held_key)
             except Exception:
                 log.exception("Could not release key held by disconnected client")
-        log.info("Connection closed for %s", peer)
+        for held_button in held_buttons:
+            try:
+                mouse.release(held_button)
+            except Exception:
+                log.exception("Could not release mouse button held by disconnected client")
+        if authenticated and _active_client is ws:
+            _active_client = None
+        log.info("Connection closed for %s", peer_ip)
 
 
-def print_banner(host, port):
+def print_banner(host, port, fingerprint, pairing_code):
     ips = get_lan_ipv4()
     line = "=" * 60
     print("")
@@ -338,20 +551,22 @@ def print_banner(host, port):
     print("  %s  —  Phone Remote for Windows" % APP_NAME)
     print(line)
     print("")
-    print("  Listening on  ws://%s:%s" % (host, port))
+    print("  Encrypted WebSocket: wss://<laptop-ip>:%s/remote" % port)
     print("")
     if ips:
-        print("  Enter this IP on your phone (same Wi-Fi):")
+        print("  Enter one of these IP addresses on your phone (same Wi-Fi):")
         print("")
         for ip in ips:
             print("      >>>  %s  <<<" % ip)
         print("")
-        print("  Example:  ws://%s:%s" % (ips[0], port))
+        print("  Example:  wss://%s:%s/remote" % (ips[0], port))
     else:
         print("  Could not detect LAN IP. Run `ipconfig` and use your Wi-Fi IPv4.")
     print("")
-    print("  Trusted local network only — there is no authentication.")
-    print("  Allow Python through Windows Firewall if the phone cannot connect.")
+    print("  Pairing code (changes every time the server starts): %s" % pairing_code)
+    print("  Server certificate SHA-256 fingerprint (enter exactly in the app):")
+    print("      %s" % fingerprint)
+    print("  Allow Python through Windows Firewall on Private networks only.")
     print("  Press Ctrl+C to quit.")
     print(line)
     print("")
@@ -384,8 +599,8 @@ def run_tray(stop_event):
 
     try:
         image = _make_tray_icon_image()
-        menu = pystray.Menu(pystray.MenuItem("Quit SmartController", on_quit))
-        icon = pystray.Icon("smartcontroller", image, APP_NAME, menu)
+        menu = pystray.Menu(pystray.MenuItem("Quit Phone Remote", on_quit))
+        icon = pystray.Icon("phone-remote", image, APP_NAME, menu)
         log.info("System tray icon is running. Right-click it to quit.")
         icon.run()
         return True
@@ -394,16 +609,20 @@ def run_tray(stop_event):
         return False
 
 
-async def run_server(host, port, stop_event):
-    print_banner(host, port)
+async def run_server(host, port, stop_event, tls_context, fingerprint, pairing_code):
+    print_banner(host, port, fingerprint, pairing_code)
     try:
-        server = await websockets.serve(
+        server = await serve(
             handle_client,
             host,
             port,
+            ssl=tls_context,
             max_size=MAX_MESSAGE_BYTES,
             ping_interval=20,
             ping_timeout=20,
+            max_queue=8,
+            open_timeout=10,
+            close_timeout=3,
         )
     except OSError as exc:
         log.error("Could not bind %s:%s — %s", host, port, exc)
@@ -419,13 +638,15 @@ async def run_server(host, port, stop_event):
         log.info("Server stopped.")
 
 
-def start_asyncio_thread(host, port, stop_event):
+def start_asyncio_thread(host, port, stop_event, tls_context, fingerprint, pairing_code):
     loop = asyncio.new_event_loop()
 
     def _runner():
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(run_server(host, port, stop_event))
+            loop.run_until_complete(
+                run_server(host, port, stop_event, tls_context, fingerprint, pairing_code)
+            )
         except Exception:
             log.exception("Server thread exited with an error")
             stop_event.set()
@@ -451,7 +672,23 @@ def parse_args(argv):
 
 
 def main(argv=None):
+    global _PAIRING_CODE
+
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if args.port < 1 or args.port > 65535:
+        print("Port must be between 1 and 65535.")
+        return 2
+
+    try:
+        cert_path, key_path, cert = _ensure_tls_certificate()
+        tls_context = _make_tls_context(cert_path, key_path)
+    except Exception as exc:
+        log.exception("Could not prepare the TLS server identity")
+        print("TLS setup failed: %s" % exc)
+        return 1
+
+    fingerprint = _fingerprint(cert)
+    _PAIRING_CODE = "%08d" % secrets.randbelow(100000000)
     stop_event = threading.Event()
 
     def _request_stop(_signum=None, _frame=None):
@@ -465,7 +702,9 @@ def main(argv=None):
         pass
 
     use_tray = (not args.no_tray) and os.name == "nt"
-    thread = start_asyncio_thread(args.host, args.port, stop_event)
+    thread = start_asyncio_thread(
+        args.host, args.port, stop_event, tls_context, fingerprint, _PAIRING_CODE
+    )
 
     if use_tray:
         ran = run_tray(stop_event)

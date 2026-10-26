@@ -4,7 +4,7 @@ Use an Android phone as a wireless keyboard, touchpad, and media remote for a Wi
 
 ## Requirements
 
-- Windows 10/11 laptop with Python 3.8 or newer
+- Windows 10/11 laptop with Python 3.11 or newer
 - Flutter stable and Android SDK for building/installing the Android app
 - Phone and laptop connected to the same Wi-Fi network
 
@@ -13,15 +13,15 @@ Use an Android phone as a wireless keyboard, touchpad, and media remote for a Wi
 Open PowerShell in `windows_server`:
 
 ```powershell
-python -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python server.py
+python server.py --no-tray
 ```
 
-The server prints the laptop's LAN IP and listens on port `8765`. `run.bat` creates/activates the virtual environment, installs dependencies, and starts the server. On Windows it also starts a tray icon; right-click the icon to quit. Pass `--no-tray` to keep the console process.
+The server prints the laptop's LAN IP, an 8-digit pairing code, and a SHA-256 certificate fingerprint. Enter the code and fingerprint in the app. The code changes each time the server starts. `run.bat` creates the Python 3.11 environment and starts the server.
 
-If Windows Firewall prompts, allow Python on Private networks. If no prompt appears and the phone cannot connect, allow inbound TCP port 8765 in Windows Defender Firewall.
+If Windows Firewall prompts, allow Python on **Private networks only** (inbound TCP `8765`). Never allow it on Public networks.
 
 ## Start the Android app
 
@@ -33,7 +33,7 @@ flutter pub get
 flutter run
 ```
 
-Enter the IP printed by the server and port `8765`. The app persists the address and automatically retries after the connection drops. To build a release APK, run `flutter build apk --release`; output is in `android_app\build\app\outputs\flutter-apk\app-release.apk`.
+Enter the IP, pairing code, and certificate fingerprint printed by the server. The connection uses TLS with certificate pinning and a per-start pairing code. The app persists only the IP, port, and certificate fingerprint; it does not save the pairing code.
 
 ## Features
 
@@ -44,9 +44,11 @@ Enter the IP printed by the server and port `8765`. The app persists the address
 - WebSocket keepalive and automatic reconnect
 - Optional Windows system tray icon
 
-## Network and security
+## Security
 
-Both devices must be on a LAN that permits device-to-device connections. The server listens on all network interfaces and has no authentication or encryption. Run it only on a trusted local network. The Android app uses `ws://` for local connectivity.
+The phone uses `wss://` with TLS 1.2 or newer and verifies the server's SHA-256 certificate fingerprint. The server requires the 8-digit pairing code, limits failed pairing attempts, allows one controlling phone at a time, limits message size, and releases held input when a client disconnects. Its private TLS key stays in the Windows user's LocalAppData folder. Keep the server on trusted Wi-Fi and allow it through Windows Firewall on Private networks only.
+
+Review [PLAY_STORE_CHECKLIST.md](PLAY_STORE_CHECKLIST.md) before a public release. The in-app privacy policy and [policy draft](PRIVACY_POLICY.md) still contain a contact placeholder that must be replaced before publication.
 
 ## Project layout
 
