@@ -86,7 +86,7 @@ class PhoneRemoteLauncher:
             outer,
             text=(
                 "Use a trusted Wi-Fi network. If Windows Firewall asks, allow this app "
-                "on Private networks only. Never expose port 8765 to the public internet."
+                "on Private networks only. Never expose the selected port to the public internet."
             ),
             wraplength=540,
             justify="left",
