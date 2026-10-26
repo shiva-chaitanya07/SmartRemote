@@ -60,10 +60,13 @@ class ServerMessage {
     try {
       final decoded = jsonDecode(raw as String);
       if (decoded is! Map<String, dynamic>) return null;
+      final type = decoded['type'];
+      final status = decoded['status'];
+      final message = decoded['message'];
       return ServerMessage(
-        type: decoded['type'] as String? ?? '',
-        status: decoded['status'] as String?,
-        message: decoded['message'] as String?,
+        type: type is String ? type : '',
+        status: status is String ? status : null,
+        message: message is String ? message : null,
       );
     } catch (_) {
       return null;

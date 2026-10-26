@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../protocol.dart';
+import '../utils/certificate_pin.dart';
 
 enum LinkStatus { disconnected, connecting, connected, reconnecting }
 
@@ -115,8 +115,10 @@ class RemoteClient {
     try {
       final httpClient = HttpClient();
       httpClient.badCertificateCallback = (certificate, _, __) {
-        final presented = sha256.convert(certificate.der).toString();
-        return presented == _certificateFingerprint;
+        return matchesServerCertificate(
+          certificate.der,
+          _certificateFingerprint,
+        );
       };
       _httpClient = httpClient;
       final channel = IOWebSocketChannel.connect(

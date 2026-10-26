@@ -1,7 +1,15 @@
 # Python
 windows_server/.venv/
 windows_server/venv/
+windows_server/.build-venv/
+windows_server/.verify-venv/
+windows_server/build/
+windows_server/dist/
+windows_server/*.spec
+windows_server/.pytest_cache/
+windows_server/.coverage
 windows_server/__pycache__/
+windows_server/tests/__pycache__/
 *.py[cod]
 *.egg-info/
 .Python

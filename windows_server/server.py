@@ -54,8 +54,11 @@ except ImportError:
     sys.exit(1)
 
 APP_NAME = "Phone Remote"
-DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
+PRIVATE_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 MAX_MESSAGE_BYTES = 32 * 1024
 MAX_TEXT_CHARS = 500
 MAX_MOUSE_DELTA = 4000
@@ -67,11 +70,15 @@ AUTH_LOCKOUT_SECONDS = 60
 MAX_PENDING_CLIENTS = 4
 MAX_AUTH_FAILURE_IPS = 256
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+if sys.stderr is None:
+    # A windowed PyInstaller build has no console stream; its GUI reports startup errors.
+    logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()])
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
 log = logging.getLogger("smartcontroller")
 
 keyboard = KeyboardController()
@@ -151,12 +158,21 @@ MOUSE_BUTTONS = {
 def get_lan_ipv4():
     """Best-effort LAN IPv4 so the phone can connect on the same Wi-Fi."""
     candidates = []
+
+    def add_private_address(value):
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return
+        if address.version == 4 and any(
+            address in network for network in PRIVATE_IPV4_NETWORKS
+        ):
+            candidates.append(str(address))
+
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127."):
-                candidates.append(ip)
+            add_private_address(info[4][0])
     except socket.error:
         pass
 
@@ -165,8 +181,10 @@ def get_lan_ipv4():
     try:
         sock.connect(("8.8.8.8", 80))
         ip = sock.getsockname()[0]
-        if ip and not ip.startswith("127."):
-            candidates.insert(0, ip)
+        if ip:
+            add_private_address(ip)
+            if candidates and candidates[-1] == ip:
+                candidates.insert(0, candidates.pop())
     except socket.error:
         pass
     finally:
@@ -543,8 +561,7 @@ async def handle_client(ws):
         log.info("Connection closed for %s", peer_ip)
 
 
-def print_banner(host, port, fingerprint, pairing_code):
-    ips = get_lan_ipv4()
+def print_banner(port, fingerprint, pairing_code, ips):
     line = "=" * 60
     print("")
     print(line)
@@ -609,46 +626,94 @@ def run_tray(stop_event):
         return False
 
 
-async def run_server(host, port, stop_event, tls_context, fingerprint, pairing_code):
-    print_banner(host, port, fingerprint, pairing_code)
-    try:
-        server = await serve(
-            handle_client,
-            host,
-            port,
-            ssl=tls_context,
-            max_size=MAX_MESSAGE_BYTES,
-            ping_interval=20,
-            ping_timeout=20,
-            max_queue=8,
-            open_timeout=10,
-            close_timeout=3,
+async def run_server(
+    host,
+    port,
+    stop_event,
+    tls_context,
+    fingerprint,
+    pairing_code,
+    ready_event=None,
+    show_banner=True,
+):
+    bind_hosts = [host] if host else get_lan_ipv4()
+    if not bind_hosts:
+        raise OSError(
+            "No private LAN IPv4 address was found. Connect to Wi-Fi or provide --host."
         )
+    if show_banner:
+        print_banner(port, fingerprint, pairing_code, bind_hosts)
+    listeners = []
+    try:
+        for bind_host in bind_hosts:
+            listener = await serve(
+                handle_client,
+                bind_host,
+                port,
+                ssl=tls_context,
+                max_size=MAX_MESSAGE_BYTES,
+                ping_interval=20,
+                ping_timeout=20,
+                max_queue=8,
+                open_timeout=10,
+                close_timeout=3,
+            )
+            listeners.append(listener)
     except OSError as exc:
-        log.error("Could not bind %s:%s — %s", host, port, exc)
+        for listener in listeners:
+            listener.close()
+        if listeners:
+            await asyncio.gather(*(listener.wait_closed() for listener in listeners))
+        log.error("Could not bind Phone Remote on port %s — %s", port, exc)
         raise
 
     log.info("Server is ready.")
+    if ready_event is not None:
+        ready_event.set()
     try:
         while not stop_event.is_set():
             await asyncio.sleep(0.25)
     finally:
-        server.close()
-        await server.wait_closed()
+        for listener in listeners:
+            listener.close()
+        await asyncio.gather(*(listener.wait_closed() for listener in listeners))
         log.info("Server stopped.")
 
 
-def start_asyncio_thread(host, port, stop_event, tls_context, fingerprint, pairing_code):
+def start_asyncio_thread(
+    host,
+    port,
+    stop_event,
+    tls_context,
+    fingerprint,
+    pairing_code,
+    ready_event=None,
+    error_callback=None,
+    show_banner=True,
+):
     loop = asyncio.new_event_loop()
 
     def _runner():
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(
-                run_server(host, port, stop_event, tls_context, fingerprint, pairing_code)
+                run_server(
+                    host,
+                    port,
+                    stop_event,
+                    tls_context,
+                    fingerprint,
+                    pairing_code,
+                    ready_event=ready_event,
+                    show_banner=show_banner,
+                )
             )
-        except Exception:
+        except Exception as exc:
             log.exception("Server thread exited with an error")
+            if error_callback is not None:
+                error_callback(exc)
+            if ready_event is not None:
+                ready_event.set()
             stop_event.set()
         finally:
             loop.stop()
@@ -659,9 +724,26 @@ def start_asyncio_thread(host, port, stop_event, tls_context, fingerprint, pairi
     return thread
 
 
+def prepare_server_session(port=DEFAULT_PORT):
+    """Create the TLS identity and fresh in-memory pairing code for a session."""
+    global _PAIRING_CODE
+
+    if port < 1 or port > 65535:
+        raise ValueError("Port must be between 1 and 65535")
+    cert_path, key_path, cert = _ensure_tls_certificate()
+    tls_context = _make_tls_context(cert_path, key_path)
+    fingerprint = _fingerprint(cert)
+    _PAIRING_CODE = "%08d" % secrets.randbelow(100000000)
+    return tls_context, fingerprint, _PAIRING_CODE
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="%s Windows WebSocket server" % APP_NAME)
-    parser.add_argument("--host", default=DEFAULT_HOST, help="Bind address (default 0.0.0.0)")
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Bind to this address instead of detected private LAN IPv4 interfaces",
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Listen port (default 8765)")
     parser.add_argument(
         "--no-tray",
@@ -680,15 +762,12 @@ def main(argv=None):
         return 2
 
     try:
-        cert_path, key_path, cert = _ensure_tls_certificate()
-        tls_context = _make_tls_context(cert_path, key_path)
+        tls_context, fingerprint, pairing_code = prepare_server_session(args.port)
     except Exception as exc:
         log.exception("Could not prepare the TLS server identity")
         print("TLS setup failed: %s" % exc)
         return 1
 
-    fingerprint = _fingerprint(cert)
-    _PAIRING_CODE = "%08d" % secrets.randbelow(100000000)
     stop_event = threading.Event()
 
     def _request_stop(_signum=None, _frame=None):
@@ -703,7 +782,7 @@ def main(argv=None):
 
     use_tray = (not args.no_tray) and os.name == "nt"
     thread = start_asyncio_thread(
-        args.host, args.port, stop_event, tls_context, fingerprint, _PAIRING_CODE
+        args.host, args.port, stop_event, tls_context, fingerprint, pairing_code
     )
 
     if use_tray:

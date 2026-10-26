@@ -1,31 +1,12 @@
-import 'dart:io';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/remote_client.dart';
+import '../utils/network_address.dart';
 
 const _kHost = 'last_host';
 const _kPort = 'last_port';
 const _kFingerprint = 'server_certificate_fingerprint';
-
-bool _isLocalNetworkAddress(String host) {
-  final address = InternetAddress.tryParse(host);
-  if (address == null) return false;
-  final bytes = address.rawAddress;
-  if (bytes.length == 4) {
-    final first = bytes[0];
-    final second = bytes[1];
-    return first == 10 ||
-        first == 127 ||
-        (first == 172 && second >= 16 && second <= 31) ||
-        (first == 192 && second == 168) ||
-        (first == 169 && second == 254);
-  }
-  return address.isLoopback ||
-      address.isLinkLocal ||
-      (bytes.length == 16 && (bytes[0] & 0xfe) == 0xfc);
-}
 
 class ConnectionController extends StateNotifier<LinkSnapshot> {
   ConnectionController()
@@ -77,7 +58,7 @@ class ConnectionController extends StateNotifier<LinkSnapshot> {
       );
       return;
     }
-    if (!_isLocalNetworkAddress(cleaned)) {
+    if (!isLocalNetworkAddress(cleaned)) {
       state = LinkSnapshot(
         status: LinkStatus.disconnected,
         host: cleaned,
