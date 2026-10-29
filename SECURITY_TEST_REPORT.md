@@ -32,3 +32,12 @@
 ## Conclusion
 
 The tests provide useful evidence that the protocol rejects common malformed and unauthorized inputs and that the server's TLS/pairing flow works in a controlled local environment. They do not establish that the application is safe against all attacks. Complete physical-device testing and an independent security assessment before public release.
+
+## Experimental Bluetooth HID prototype update (October 27, 2026)
+
+An Android Bluetooth HID path has been added as an experimental prototype. It is not covered by the earlier automated security or integration test results. The Android build could not reach compilation in this environment because Gradle failed with “Unable to establish loopback connection.” The project owner reports that initial pairing and remote input work on their phone and Windows laptop. Relaunch/reconnect behavior has required work and is not independently verified after the latest changes. No independent penetration test has been performed for this path. Treat it as experimental and use the established Wi-Fi mode if Bluetooth does not work reliably.
+
+
+## Bluetooth reconnect update (October 29, 2026)
+
+The Android app now stores the last selected Bluetooth host address locally and attempts to re-register HID and reconnect when Bluetooth mode is opened. Android can disconnect HID when the app leaves the foreground; pairing should remain intact. Dart analysis passed with style-only lint notices. A fresh Android build and physical-device verification of the reconnect change are still pending.

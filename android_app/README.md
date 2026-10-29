@@ -1,11 +1,11 @@
 # Phone Remote Android app
 
-Flutter Android client for the Phone Remote Windows server.
+Flutter Android client for Phone Remote. It supports the established Wi-Fi server mode and an experimental native Bluetooth HID mode that may let compatible phones control Windows without the companion server.
 
 ## Requirements
 
 - Flutter stable with Android SDK and platform tools installed
-- Android phone or emulator with network access to the same LAN as the Windows PC
+- Android phone or emulator. Wi-Fi mode requires the same LAN as the Windows PC; Bluetooth HID mode requires compatible Bluetooth HID support on the phone and Bluetooth on the laptop.
 
 ## Run
 

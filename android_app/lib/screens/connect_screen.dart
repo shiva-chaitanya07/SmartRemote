@@ -6,6 +6,7 @@ import '../services/remote_client.dart';
 import '../theme.dart';
 import '../widgets/status_banner.dart';
 import 'privacy_screen.dart';
+import 'bluetooth_connect_screen.dart';
 import 'remote_screen.dart';
 
 class ConnectScreen extends ConsumerStatefulWidget {
@@ -119,7 +120,20 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                 'Control your Windows laptop securely over your local Wi-Fi.',
                 style: TextStyle(color: AppTheme.textMuted, height: 1.4),
               ),
-              const SizedBox(height: 28),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BluetoothConnectScreen()),
+                ),
+                icon: const Icon(Icons.bluetooth),
+                label: const Text('Try Bluetooth HID (experimental)'),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Bluetooth HID can control Windows directly without the laptop server. Availability depends on your phone.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+              ),
+              const SizedBox(height: 24),
               TextField(
                 controller: _ipController,
                 keyboardType: TextInputType.url,

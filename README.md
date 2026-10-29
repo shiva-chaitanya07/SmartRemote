@@ -1,12 +1,14 @@
 # Phone Remote
 
-Use an Android phone as a wireless keyboard, touchpad, and media remote for a Windows laptop over the local Wi-Fi network.
+Use an Android phone as a wireless keyboard, touchpad, and media remote for a Windows laptop. The original mode uses local Wi-Fi and a Windows companion; an experimental Bluetooth HID prototype is included for compatible phones.
+
+New to the project? Start with the [complete beginner-friendly project guide](PROJECT_GUIDE.md) for setup, connection, troubleshooting, and security notes.
 
 ## Requirements
 
-- Windows 10/11 laptop with Python 3.11 or newer
+- Windows 10/11 laptop with Python 3.11 or newer for Wi-Fi mode (not required for compatible Bluetooth HID mode)
 - Flutter stable and Android SDK for building/installing the Android app
-- Phone and laptop connected to the same Wi-Fi network
+- Same Wi-Fi network for the original server mode; Bluetooth support on both devices for experimental HID mode
 
 ## Start the Windows server without shell commands
 
@@ -37,11 +39,14 @@ Enter the IP, pairing code, and certificate fingerprint printed by the server. T
 - Touchpad pointer movement, single-finger left click, two-finger right click, and two-finger scrolling
 - Play/pause and volume controls
 - WebSocket keepalive and automatic reconnect
-- Optional Windows system tray icon
+- Optional Windows system tray icon for Wi-Fi mode
+- Experimental Bluetooth HID mode, intended to avoid a laptop-side server on compatible phones
 
 ## Security
 
 The phone uses `wss://` with TLS 1.2 or newer and verifies the server's SHA-256 certificate fingerprint. The server requires the 8-digit pairing code, limits failed pairing attempts, allows one controlling phone at a time, limits message size, and releases held input when a client disconnects. Its private TLS key stays in the Windows user's LocalAppData folder. Keep the server on trusted Wi-Fi and allow it through Windows Firewall on Private networks only.
+
+Bluetooth HID is an experimental prototype and has not yet had physical-device validation. The Wi-Fi mode remains the established path.
 
 Review [PLAY_STORE_CHECKLIST.md](PLAY_STORE_CHECKLIST.md) before a public release. The in-app privacy policy and [policy draft](PRIVACY_POLICY.md) still contain a contact placeholder that must be replaced before publication.
 
